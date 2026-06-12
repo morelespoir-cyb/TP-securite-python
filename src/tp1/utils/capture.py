@@ -1,7 +1,25 @@
+import re
+
 from scapy.all import sniff
+from scapy.layers.inet import IP, TCP
+from scapy.layers.l2 import ARP, Ether
+from scapy.packet import Raw
 
 from src.tp1.utils.lib import choose_interface
 from tp1.utils.config import logger
+
+
+# Common SQL injection signatures (case-insensitive)
+SQLI_PATTERNS: list[str] = [
+    r"(?i)'\s*or\s*'?\s*\d+\s*'?\s*=\s*'?\s*\d+",   # ' OR 1=1
+    r"(?i)\bunion\s+select\b",                       # UNION SELECT
+    r"(?i)\bdrop\s+table\b",                         # DROP TABLE
+    r"(?i)\binsert\s+into\b",                        # INSERT INTO
+    r"(?i)/\*.*?\*/",                                # /* SQL block comment */
+    r"(?i)--\s",                                     # -- SQL line comment
+    r"(?i)\bxp_cmdshell\b",                          # SQL Server cmd exec
+    r"(?i)\bexec(?:ute)?\s*\(",                      # EXEC(...)
+]
 
 
 class Capture:
@@ -11,7 +29,8 @@ class Capture:
     def __init__(self) -> None:
         self.interface = choose_interface()
         self.summary = ""
-        self.packets = []  # Will hold the captured Scapy PacketList
+        self.packets = []
+        self.threats: list[dict] = []  # accumulated by analyse()
 
     def capture_traffic(
         self,
@@ -20,9 +39,7 @@ class Capture:
     ) -> None:
         """
         Capture network traffic from the chosen interface using Scapy.
-
-        Stops after `count` packets or `timeout` seconds, whichever comes first.
-        Requires root privileges (CAP_NET_RAW) — run with `sudo poetry run tp1`.
+        Requires root privileges — run with `sudo poetry run tp1`.
         """
         interface = self.interface
         if not interface:
@@ -45,15 +62,7 @@ class Capture:
             self.packets = []
 
     def get_all_protocols(self) -> dict[str, int]:
-        """
-        Count packets by protocol layer name.
-
-        For each captured packet, walk through its Scapy layers (Ether, IP,
-        TCP, etc.) and increment the counter for each layer encountered.
-        A single TCP/IP packet contributes to Ether, IP and TCP counts.
-
-        :return: dict mapping protocol name → number of packets
-        """
+        """Count packets by protocol layer name."""
         counts: dict[str, int] = {}
         for packet in self.packets:
             for layer_class in packet.layers():
@@ -62,38 +71,129 @@ class Capture:
         return counts
 
     def sort_network_protocols(self) -> list[tuple[str, int]]:
-        """
-        Sort protocols by packet count, descending.
-
-        Useful for reporting (most-frequent protocol first) and for the
-        graph generation in the PDF report.
-
-        :return: list of (protocol_name, count) tuples sorted desc by count
-        """
+        """Sort protocols by packet count, descending."""
         protocols = self.get_all_protocols()
         return sorted(protocols.items(), key=lambda kv: kv[1], reverse=True)
 
-    def analyse(self, protocols: str) -> None:
+    def _detect_arp_spoofing(self) -> list[dict]:
         """
-        Analyse all captured data and generate the summary.
-        Full detection logic (SQLi, ARP spoofing) comes in Lot 4.
+        Detect ARP spoofing: same IP claimed by multiple MAC addresses
+        in ARP reply packets (opcode=2).
+        """
+        threats: list[dict] = []
+        ip_to_macs: dict[str, set[str]] = {}
+
+        for packet in self.packets:
+            if not packet.haslayer(ARP):
+                continue
+            arp = packet[ARP]
+            if arp.op != 2:  # only inspect ARP replies
+                continue
+            ip_to_macs.setdefault(arp.psrc, set()).add(arp.hwsrc)
+
+        for ip, macs in ip_to_macs.items():
+            if len(macs) > 1:
+                threats.append(
+                    {
+                        "attack_type": "ARP Spoofing",
+                        "protocol": "ARP",
+                        "src_ip": ip,
+                        "src_mac": ", ".join(sorted(macs)),
+                        "details": (
+                            f"IP {ip} claimed by {len(macs)} MACs: "
+                            f"{sorted(macs)}"
+                        ),
+                    }
+                )
+        return threats
+
+    def _detect_sql_injection(self) -> list[dict]:
+        """
+        Detect SQL injection patterns in TCP payloads (plaintext HTTP).
+        Stops at first match per packet to avoid duplicate threats.
+        """
+        threats: list[dict] = []
+
+        for packet in self.packets:
+            if not (packet.haslayer(TCP) and packet.haslayer(Raw)):
+                continue
+
+            payload = bytes(packet[Raw].load).decode("utf-8", errors="ignore")
+
+            for pattern in SQLI_PATTERNS:
+                match = re.search(pattern, payload)
+                if match:
+                    src_ip = packet[IP].src if packet.haslayer(IP) else "?"
+                    src_mac = (
+                        packet[Ether].src if packet.haslayer(Ether) else "?"
+                    )
+                    threats.append(
+                        {
+                            "attack_type": "SQL Injection",
+                            "protocol": "TCP/HTTP",
+                            "src_ip": src_ip,
+                            "src_mac": src_mac,
+                            "details": f"Pattern matched: {match.group(0)!r}",
+                        }
+                    )
+                    break  # one threat per packet is enough
+        return threats
+
+    def analyse(self, protocols: str = "all") -> None:
+        """
+        Run all attack detectors on captured packets and generate summary.
+        Detected threats are accumulated in self.threats for the PDF report.
         """
         all_protocols = self.get_all_protocols()
         sort = self.sort_network_protocols()
         logger.debug(f"All protocols: {all_protocols}")
         logger.debug(f"Sorted protocols: {sort}")
 
+        self.threats = []
+        self.threats.extend(self._detect_arp_spoofing())
+        self.threats.extend(self._detect_sql_injection())
+
+        if self.threats:
+            logger.warning(f"{len(self.threats)} threat(s) detected!")
+            for t in self.threats:
+                logger.warning(
+                    f"  - {t['attack_type']} from {t.get('src_ip', '?')}"
+                )
+        else:
+            logger.info("No suspicious traffic detected — all good")
+
         self.summary = self._gen_summary()
 
     def get_summary(self) -> str:
-        """
-        Return summary
-        """
+        """Return summary."""
         return self.summary
 
     def _gen_summary(self) -> str:
         """
-        Generate summary
+        Generate a human-readable summary of the analysis:
+        - total packet count
+        - protocol distribution (sorted)
+        - threats list (if any)
         """
-        summary = ""
-        return summary
+        lines: list[str] = []
+        total = len(self.packets)
+        lines.append(f"Total packets captured: {total}")
+        lines.append("")
+        lines.append("Protocol distribution:")
+        for proto, count in self.sort_network_protocols():
+            lines.append(f"  - {proto}: {count}")
+        lines.append("")
+
+        if self.threats:
+            lines.append(f"{len(self.threats)} suspicious activity detected:")
+            for t in self.threats:
+                lines.append(
+                    f"  - [{t['attack_type']}] {t.get('protocol', '?')} | "
+                    f"src_ip={t.get('src_ip', '?')} | "
+                    f"src_mac={t.get('src_mac', '?')} | "
+                    f"{t.get('details', '')}"
+                )
+        else:
+            lines.append("No suspicious activity detected.")
+
+        return "\n".join(lines)
