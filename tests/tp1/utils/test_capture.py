@@ -17,11 +17,35 @@ def capture():
 def test_capture_init(capture):
     assert capture.interface == ""
     assert capture.summary == ""
+    assert capture.packets == []
 
 
-def test_given_capture_when_capture_traffic_then_interface_is_set(capture):
+def test_capture_traffic_no_interface(capture):
+    """When no interface is selected, capture is skipped, packets stay empty."""
+    capture.interface = ""
     capture.capture_traffic()
-    assert capture.interface == ""
+    assert capture.packets == []
+
+
+@patch("src.tp1.utils.capture.sniff")
+def test_capture_traffic_calls_sniff(mock_sniff, capture):
+    """When interface is set, sniff is called with correct args, packets stored."""
+    capture.interface = "eth0"
+    fake_packets = ["pkt1", "pkt2", "pkt3"]
+    mock_sniff.return_value = fake_packets
+
+    capture.capture_traffic(count=10, timeout=5)
+
+    mock_sniff.assert_called_once_with(iface="eth0", count=10, timeout=5)
+    assert capture.packets == fake_packets
+
+
+@patch("src.tp1.utils.capture.sniff", side_effect=PermissionError("no root"))
+def test_capture_traffic_handles_permission_error(_mock_sniff, capture):
+    """Permission errors are caught, packets reset to empty."""
+    capture.interface = "eth0"
+    capture.capture_traffic()
+    assert capture.packets == []
 
 
 def test_sort_network_protocols(capture):
