@@ -23,9 +23,6 @@ class Capture:
 
         Stops after `count` packets or `timeout` seconds, whichever comes first.
         Requires root privileges (CAP_NET_RAW) — run with `sudo poetry run tp1`.
-
-        :param count: maximum number of packets to capture
-        :param timeout: max capture duration in seconds (safety net)
         """
         interface = self.interface
         if not interface:
@@ -47,21 +44,39 @@ class Capture:
             logger.error(f"Capture failed: {e}")
             self.packets = []
 
-    def sort_network_protocols(self) -> str:
+    def get_all_protocols(self) -> dict[str, int]:
         """
-        Sort and return all captured network protocols
-        """
-        return ""
+        Count packets by protocol layer name.
 
-    def get_all_protocols(self) -> str:
+        For each captured packet, walk through its Scapy layers (Ether, IP,
+        TCP, etc.) and increment the counter for each layer encountered.
+        A single TCP/IP packet contributes to Ether, IP and TCP counts.
+
+        :return: dict mapping protocol name → number of packets
         """
-        Return all protocols captured with total packets number
+        counts: dict[str, int] = {}
+        for packet in self.packets:
+            for layer_class in packet.layers():
+                name = layer_class.__name__
+                counts[name] = counts.get(name, 0) + 1
+        return counts
+
+    def sort_network_protocols(self) -> list[tuple[str, int]]:
         """
-        return ""
+        Sort protocols by packet count, descending.
+
+        Useful for reporting (most-frequent protocol first) and for the
+        graph generation in the PDF report.
+
+        :return: list of (protocol_name, count) tuples sorted desc by count
+        """
+        protocols = self.get_all_protocols()
+        return sorted(protocols.items(), key=lambda kv: kv[1], reverse=True)
 
     def analyse(self, protocols: str) -> None:
         """
-        Analyse all captured data and return statement
+        Analyse all captured data and generate the summary.
+        Full detection logic (SQLi, ARP spoofing) comes in Lot 4.
         """
         all_protocols = self.get_all_protocols()
         sort = self.sort_network_protocols()
