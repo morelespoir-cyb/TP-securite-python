@@ -9,3 +9,4 @@ __pycache__/
 report.pdf
 app.log
 .env
+chart.svg
