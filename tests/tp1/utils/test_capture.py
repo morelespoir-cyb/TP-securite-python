@@ -1,4 +1,5 @@
 import pytest
+import subprocess
 from unittest.mock import patch, MagicMock
 
 from scapy.layers.inet import IP, TCP
@@ -29,6 +30,8 @@ def test_capture_init(capture):
     assert capture.summary == ""
     assert capture.packets == []
     assert capture.threats == []
+    assert capture.blocked_ips == []
+
 
 
 def test_capture_traffic_no_interface(capture):
@@ -177,6 +180,7 @@ def test_analyse(capture):
         patch.object(capture, "sort_network_protocols") as mock_sort,
         patch.object(capture, "_detect_arp_spoofing", return_value=[]) as mock_arp,
         patch.object(capture, "_detect_sql_injection", return_value=[]) as mock_sqli,
+        patch.object(capture, "_block_attackers") as mock_block,
         patch.object(capture, "_gen_summary", return_value="Test summary") as mock_gen,
     ):
         capture.analyse("tcp")
@@ -185,21 +189,24 @@ def test_analyse(capture):
     mock_sort.assert_called_once()
     mock_arp.assert_called_once()
     mock_sqli.assert_called_once()
+    mock_block.assert_not_called()  # no threats → no blocking
     mock_gen.assert_called_once()
     assert capture.summary == "Test summary"
     assert capture.threats == []
 
 
-def test_analyse_collects_threats(capture):
-    """Threats from detectors are merged into self.threats."""
+def test_analyse_collects_threats_and_blocks(capture):
+    """When threats exist, block_attackers is called."""
     with (
-        patch.object(capture, "_detect_arp_spoofing", return_value=[{"attack_type": "ARP Spoofing"}]),
-        patch.object(capture, "_detect_sql_injection", return_value=[{"attack_type": "SQL Injection"}]),
+        patch.object(capture, "_detect_arp_spoofing", return_value=[{"attack_type": "ARP Spoofing", "src_ip": "1.1.1.1"}]),
+        patch.object(capture, "_detect_sql_injection", return_value=[{"attack_type": "SQL Injection", "src_ip": "2.2.2.2"}]),
+        patch.object(capture, "_block_attackers") as mock_block,
         patch.object(capture, "_gen_summary", return_value=""),
     ):
         capture.analyse("all")
 
     assert len(capture.threats) == 2
+    mock_block.assert_called_once()
 
 
 def test_get_summary(capture):
@@ -231,3 +238,56 @@ def test_gen_summary_with_threats(capture):
     assert "1 suspicious activity detected" in result
     assert "ARP Spoofing" in result
     assert "192.168.1.10" in result
+
+    # ---------- attacker blocking ----------
+
+def test_block_attackers_dry_run_by_default(capture):
+    """Dry-run: no subprocess call, but IPs recorded."""
+    capture.threats = [
+        {"attack_type": "SQL Injection", "src_ip": "10.0.0.1"},
+        {"attack_type": "SQL Injection", "src_ip": "10.0.0.2"},
+    ]
+    with patch("src.tp1.utils.capture.subprocess.run") as mock_run:
+        capture._block_attackers(dry_run=True)
+    mock_run.assert_not_called()
+    assert sorted(capture.blocked_ips) == ["10.0.0.1", "10.0.0.2"]
+
+def test_block_attackers_real_calls_iptables(capture):
+    """Real mode: iptables DROP rule added per unique IP."""
+    capture.threats = [
+        {"attack_type": "SQL Injection", "src_ip": "10.0.0.1"},
+    ]
+    with patch("src.tp1.utils.capture.subprocess.run") as mock_run:
+        capture._block_attackers(dry_run=False)
+    mock_run.assert_called_once()
+    args = mock_run.call_args.args[0]
+    assert args == ["iptables", "-A", "INPUT", "-s", "10.0.0.1", "-j", "DROP"]
+    assert capture.blocked_ips == ["10.0.0.1"]
+
+def test_block_attackers_deduplicates_ips(capture):
+    """Same IP in multiple threats → single block."""
+    capture.threats = [
+        {"attack_type": "SQL Injection", "src_ip": "10.0.0.1"},
+        {"attack_type": "SQL Injection", "src_ip": "10.0.0.1"},
+        {"attack_type": "SQL Injection", "src_ip": "10.0.0.1"},
+    ]
+    capture._block_attackers(dry_run=True)
+    assert capture.blocked_ips == ["10.0.0.1"]
+
+def test_block_attackers_ignores_unknown_ips(capture):
+    """Threats with '?' src_ip are skipped (nothing to block)."""
+    capture.threats = [{"attack_type": "SQL Injection", "src_ip": "?"}]
+    capture._block_attackers(dry_run=True)
+    assert capture.blocked_ips == []
+
+def test_block_attackers_handles_iptables_failure(capture):
+    """iptables error is logged, no crash, no IP recorded."""
+    capture.threats = [{"attack_type": "SQL Injection", "src_ip": "10.0.0.1"}]
+    with patch(
+            "src.tp1.utils.capture.subprocess.run",
+            side_effect=subprocess.CalledProcessError(
+                1, ["iptables"], stderr=b"permission denied"
+            ),
+    ):
+        capture._block_attackers(dry_run=False)
+    assert capture.blocked_ips == []

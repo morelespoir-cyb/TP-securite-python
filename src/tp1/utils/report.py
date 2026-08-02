@@ -1,3 +1,4 @@
+import os
 import pygal
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
@@ -129,6 +130,28 @@ class Report:
                     f"src_mac={t.get('src_mac', '?')}\n"
                     f"  {t.get('details', '')}",
                 )
+                # --- Blocking actions section ---
+                blocked = getattr(self.capture, "blocked_ips", [])
+                if blocked:
+                    pdf.ln(5)
+                    pdf.set_text_color(0, 100, 0)
+                    pdf.set_font("Helvetica", "B", 12)
+                    mode = (
+                        "REAL"
+                        if os.environ.get("TP1_BLOCK_ATTACKERS", "0") == "1"
+                        else "DRY-RUN"
+                    )
+                    pdf.cell(
+                        0, 7, f"Blocking actions ({mode}) - {len(blocked)} IP(s)",
+                        new_x=XPos.LMARGIN, new_y=YPos.NEXT,
+                    )
+                    pdf.set_text_color(0, 0, 0)
+                    pdf.set_font("Helvetica", "", 10)
+                    for ip in blocked:
+                        pdf.cell(
+                            0, 5, f"  - {ip}",
+                            new_x=XPos.LMARGIN, new_y=YPos.NEXT,
+                        )
 
         pdf.output(self.filename)
         logger.info(f"PDF report saved to {self.filename}")

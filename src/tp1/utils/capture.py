@@ -1,4 +1,6 @@
+import os
 import re
+import subprocess
 
 from scapy.all import sniff
 from scapy.layers.inet import IP, TCP
@@ -30,7 +32,8 @@ class Capture:
         self.interface = choose_interface()
         self.summary = ""
         self.packets = []
-        self.threats: list[dict] = []  # accumulated by analyse()
+        self.threats: list[dict] = []
+        self.blocked_ips: list[str] = []  # IPs blocked (or would-be) by iptables
 
     def capture_traffic(
         self,
@@ -139,10 +142,52 @@ class Capture:
                     break  # one threat per packet is enough
         return threats
 
+    def _block_attackers(self, dry_run: bool = True) -> None:
+        """
+        Block detected attackers by adding an iptables DROP rule per
+        unique source IP in self.threats.
+
+        Dry-run mode (default) only logs what would happen — no firewall changes.
+        Real mode requires root and can disrupt live traffic.
+        Enable real blocking by setting env var TP1_BLOCK_ATTACKERS=1.
+        """
+        unique_ips = {
+            t["src_ip"]
+            for t in self.threats
+            if t.get("src_ip") and t["src_ip"] != "?"
+        }
+
+        for ip in unique_ips:
+            if dry_run:
+                logger.warning(
+                    f"[DRY-RUN] Would block {ip} via "
+                    f"'iptables -A INPUT -s {ip} -j DROP'"
+                )
+                self.blocked_ips.append(ip)
+                continue
+
+            try:
+                subprocess.run(
+                    ["iptables", "-A", "INPUT", "-s", ip, "-j", "DROP"],
+                    check=True,
+                    capture_output=True,
+                    timeout=5,
+                )
+                logger.warning(f"BLOCKED {ip} — iptables DROP rule added")
+                self.blocked_ips.append(ip)
+            except subprocess.CalledProcessError as e:
+                logger.error(
+                    f"Failed to block {ip}: "
+                    f"{e.stderr.decode(errors='ignore').strip()}"
+                )
+            except FileNotFoundError:
+                logger.error("iptables binary not found — cannot block")
+            except subprocess.TimeoutExpired:
+                logger.error(f"iptables timeout while blocking {ip}")
+
     def analyse(self, protocols: str = "all") -> None:
         """
-        Run all attack detectors on captured packets and generate summary.
-        Detected threats are accumulated in self.threats for the PDF report.
+        Run all attack detectors + block attackers if threats found.
         """
         all_protocols = self.get_all_protocols()
         sort = self.sort_network_protocols()
@@ -150,6 +195,7 @@ class Capture:
         logger.debug(f"Sorted protocols: {sort}")
 
         self.threats = []
+        self.blocked_ips = []
         self.threats.extend(self._detect_arp_spoofing())
         self.threats.extend(self._detect_sql_injection())
 
@@ -159,6 +205,8 @@ class Capture:
                 logger.warning(
                     f"  - {t['attack_type']} from {t.get('src_ip', '?')}"
                 )
+            dry_run = os.environ.get("TP1_BLOCK_ATTACKERS", "0") != "1"
+            self._block_attackers(dry_run=dry_run)
         else:
             logger.info("No suspicious traffic detected — all good")
 
@@ -170,10 +218,8 @@ class Capture:
 
     def _gen_summary(self) -> str:
         """
-        Generate a human-readable summary of the analysis:
-        - total packet count
-        - protocol distribution (sorted)
-        - threats list (if any)
+        Generate a human-readable summary: packets, protocols, threats,
+        and blocking actions taken (or that would have been taken).
         """
         lines: list[str] = []
         total = len(self.packets)
@@ -195,5 +241,16 @@ class Capture:
                 )
         else:
             lines.append("No suspicious activity detected.")
+
+        if self.blocked_ips:
+            mode = (
+                "REAL"
+                if os.environ.get("TP1_BLOCK_ATTACKERS", "0") == "1"
+                else "DRY-RUN"
+            )
+            lines.append("")
+            lines.append(f"Blocking actions ({mode}):")
+            for ip in self.blocked_ips:
+                lines.append(f"  - {ip}")
 
         return "\n".join(lines)
