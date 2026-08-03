@@ -1,5 +1,9 @@
 """Shellcode analyzers: strings, capstone, pylibemu, LLM."""
 import re
+import json
+import os
+
+import requests
 from capstone import Cs, CS_ARCH_X86, CS_MODE_32
 from unicorn import Uc, UcError, UC_ARCH_X86, UC_MODE_32, UC_HOOK_CODE
 from unicorn.x86_const import UC_X86_REG_EBX, UC_X86_REG_EIP
@@ -160,3 +164,125 @@ def get_pylibemu_analysis(shellcode: bytes) -> dict:
         "instructions_executed": counters["n"],
         "error": error_msg,
     }
+
+# ---------- LLM analysis (Ollama backend) ----------
+
+_LLM_DEFAULT_MODEL = "qwen2.5:1.5b"
+_LLM_DEFAULT_URL = "http://localhost:11434/api/generate"
+_LLM_TIMEOUT = 60  # seconds — qwen2.5:1.5b runs in a few s on CPU, be generous
+
+
+_LLM_SYSTEM_PROMPT = (
+    "Tu es un analyste malware. On te donne les résultats de trois "
+    "analyseurs statiques/dynamiques d'un shellcode Windows x86 : "
+    "les chaînes lisibles extraites, le désassemblage x86, et les "
+    "API Windows résolues par émulation. Ton rôle est de répondre "
+    "en français, en 3 à 5 phrases maximum, sans intro ni conclusion. "
+    "Indique : (1) le type de shellcode (downloader, reverse shell, "
+    "création de compte, etc.), (2) les indicateurs qui t'ont permis "
+    "de conclure, (3) le risque associé. Reste factuel, pas de blabla."
+)
+
+
+def _build_llm_prompt(
+    strings: dict[str, list[str]],
+    instructions: list[dict],
+    emulation: dict,
+    max_instructions: int = 40,
+) -> str:
+    """
+    Compose the analyst prompt from the three analyzer outputs.
+    Instructions are truncated to keep the prompt under the model's
+    practical context window.
+    """
+    ascii_strings = strings.get("ascii", [])
+    utf16_strings = strings.get("utf16le", [])
+
+    insn_lines = [
+        f"  0x{i['address']:04x}: {i['mnemonic']:<6} {i['op_str']}"
+        for i in instructions[:max_instructions]
+    ]
+    if len(instructions) > max_instructions:
+        insn_lines.append(
+            f"  ... ({len(instructions) - max_instructions} more truncated)"
+        )
+
+    parts = [
+        "== Chaînes ASCII trouvées ==",
+        "\n".join(f"  - {s!r}" for s in ascii_strings) or "  (aucune)",
+        "",
+        "== Chaînes UTF-16LE trouvées ==",
+        "\n".join(f"  - {s!r}" for s in utf16_strings) or "  (aucune)",
+        "",
+        f"== Désassemblage x86 (premières {max_instructions} instructions) ==",
+        "\n".join(insn_lines) or "  (rien à désassembler)",
+        "",
+        "== APIs Windows détectées par émulation ==",
+        "\n".join(f"  - {api}" for api in emulation.get("detected_apis", []))
+        or "  (aucune — l'émulation n'a pas pu résoudre les APIs)",
+        "",
+        "Analyse ce shellcode.",
+    ]
+    return "\n".join(parts)
+
+
+def get_llm_analysis(
+    shellcode: bytes,
+    strings: dict[str, list[str]],
+    instructions: list[dict],
+    emulation: dict,
+) -> str:
+    """
+    Ask a local LLM (Ollama backend) to synthesise the three analyzer
+    outputs into a natural-language verdict about the shellcode intent.
+
+    Configuration via env vars:
+    - TP2_LLM_MODEL: model name (default 'qwen2.5:1.5b')
+    - TP2_LLM_URL:   Ollama API endpoint (default 'http://localhost:11434/api/generate')
+
+    Failure modes are handled gracefully:
+    - Ollama unreachable → returns an explanatory message, no exception
+    - Model missing     → returns Ollama's error message
+    - Timeout           → explicit timeout message
+
+    The `shellcode` bytes are accepted for future use (e.g. sending the
+    raw hex to the model) but are not sent in the current prompt to keep
+    the context window manageable.
+
+    :return: LLM's analysis as a French string (or an error message)
+    """
+    model = os.environ.get("TP2_LLM_MODEL", _LLM_DEFAULT_MODEL)
+    url = os.environ.get("TP2_LLM_URL", _LLM_DEFAULT_URL)
+
+    prompt = _build_llm_prompt(strings, instructions, emulation)
+    payload = {
+        "model": model,
+        "system": _LLM_SYSTEM_PROMPT,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"temperature": 0.2},  # low temp = more factual output
+    }
+
+    try:
+        response = requests.post(url, json=payload, timeout=_LLM_TIMEOUT)
+    except requests.exceptions.ConnectionError:
+        return (
+            f"[LLM unreachable] Cannot connect to Ollama at {url}. "
+            "Is the service running? Try: 'sudo systemctl start ollama' "
+            "or 'ollama serve &'."
+        )
+    except requests.exceptions.Timeout:
+        return f"[LLM timeout] Model '{model}' took >{_LLM_TIMEOUT}s to answer."
+
+    if response.status_code != 200:
+        return (
+            f"[LLM error {response.status_code}] "
+            f"{response.text[:200]}"
+        )
+
+    try:
+        data = response.json()
+    except json.JSONDecodeError:
+        return "[LLM error] Response is not valid JSON."
+
+    return data.get("response", "").strip() or "[LLM empty response]"

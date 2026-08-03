@@ -4,6 +4,7 @@ import sys
 
 from tp2.utils.analyzer import (
     get_capstone_analysis,
+    get_llm_analysis,
     get_pylibemu_analysis,
     get_shellcode_strings,
 )
@@ -11,7 +12,6 @@ from tp2.utils.config import logger
 from tp2.utils.lib import load_shellcode
 
 
-# Cap how many disassembled instructions we log (readability)
 MAX_INSTRUCTIONS_LOGGED = 30
 
 
@@ -24,6 +24,11 @@ def main() -> int:
         "-f", "--file",
         required=True,
         help="path to the shellcode file (\\xHH escape format)",
+    )
+    parser.add_argument(
+        "--skip-llm",
+        action="store_true",
+        help="skip the LLM analysis step (useful if Ollama is not running)",
     )
     args = parser.parse_args()
 
@@ -58,7 +63,7 @@ def main() -> int:
     if total > shown:
         logger.info(f"  ... {total - shown} more instructions truncated")
 
-    # --- Pylibemu-style emulation (backed by unicorn) ---
+    # --- Pylibemu-style emulation ---
     emu = get_pylibemu_analysis(shellcode)
     logger.info(
         f"Emulation — {emu['instructions_executed']} instructions executed"
@@ -74,7 +79,13 @@ def main() -> int:
     if emu["error"]:
         logger.info(f"Emulation note: {emu['error']}")
 
-    # Lot 5 will plug the LLM analyser here.
+    # --- LLM synthesis ---
+    if args.skip_llm:
+        logger.info("LLM analysis skipped (--skip-llm)")
+    else:
+        logger.info("Querying LLM for synthesis...")
+        llm_output = get_llm_analysis(shellcode, strings, instructions, emu)
+        logger.info(f"Explication LLM :\n{llm_output}")
 
     logger.info("Shellcode analysed !")
     return 0

@@ -174,3 +174,131 @@ def test_pylibemu_on_easy_shellcode_runs_without_python_crash():
     assert result["instructions_executed"] > 0
     # emulation almost certainly fails at some point → we accept it
         # but the function returns cleanly
+
+    # ---------- get_llm_analysis ----------
+
+def test_build_llm_prompt_includes_all_sections():
+    from src.tp2.utils.analyzer import _build_llm_prompt
+    prompt = _build_llm_prompt(
+        strings={"ascii": ["urlmon.dll", "C:\\U.exe"], "utf16le": []},
+        instructions=[
+            {"address": 0x1000, "mnemonic": "jmp", "op_str": "0x1056", "bytes": "eb54"},
+            {"address": 0x1002, "mnemonic": "mov", "op_str": "esi, eax", "bytes": "89c6"},
+        ],
+        emulation={"detected_apis": ["LoadLibraryA"], "instructions_executed": 100, "error": None},
+    )
+    assert "urlmon.dll" in prompt
+    assert "U.exe" in prompt
+    assert "0x1000" in prompt
+    assert "jmp" in prompt
+    assert "LoadLibraryA" in prompt
+
+def test_build_llm_prompt_handles_empty_inputs():
+    from src.tp2.utils.analyzer import _build_llm_prompt
+    prompt = _build_llm_prompt(
+        strings={"ascii": [], "utf16le": []},
+        instructions=[],
+        emulation={"detected_apis": [], "instructions_executed": 0, "error": None},
+    )
+    assert "aucune" in prompt
+
+def test_build_llm_prompt_truncates_long_instructions():
+    from src.tp2.utils.analyzer import _build_llm_prompt
+    long_insns = [
+        {"address": i, "mnemonic": "nop", "op_str": "", "bytes": "90"}
+        for i in range(100)
+    ]
+    prompt = _build_llm_prompt(
+        strings={"ascii": [], "utf16le": []},
+        instructions=long_insns,
+        emulation={"detected_apis": [], "instructions_executed": 100, "error": None},
+        max_instructions=10,
+    )
+    # We showed 10, so 90 should be "more truncated"
+    assert "90 more truncated" in prompt
+
+def test_llm_analysis_handles_connection_error(monkeypatch):
+    """Ollama down → explanatory message, no exception."""
+    import requests
+    from src.tp2.utils.analyzer import get_llm_analysis
+
+    def _raise_conn_error(*_args, **_kwargs):
+        raise requests.exceptions.ConnectionError("simulated")
+
+    monkeypatch.setattr(
+        "src.tp2.utils.analyzer.requests.post", _raise_conn_error
+    )
+    result = get_llm_analysis(
+        b"\x90",
+        strings={"ascii": [], "utf16le": []},
+        instructions=[],
+        emulation={"detected_apis": [], "instructions_executed": 0, "error": None},
+    )
+    assert "unreachable" in result.lower()
+
+def test_llm_analysis_handles_timeout(monkeypatch):
+    """Ollama hangs → explicit timeout message."""
+    import requests
+    from src.tp2.utils.analyzer import get_llm_analysis
+
+    def _raise_timeout(*_args, **_kwargs):
+        raise requests.exceptions.Timeout("simulated")
+
+    monkeypatch.setattr(
+        "src.tp2.utils.analyzer.requests.post", _raise_timeout
+    )
+    result = get_llm_analysis(
+        b"\x90",
+        strings={"ascii": [], "utf16le": []},
+        instructions=[],
+        emulation={"detected_apis": [], "instructions_executed": 0, "error": None},
+    )
+    assert "timeout" in result.lower()
+
+def test_llm_analysis_returns_llm_text_on_success(monkeypatch):
+    """Ollama returns 200 with JSON → we return the 'response' field."""
+    from src.tp2.utils.analyzer import get_llm_analysis
+
+    class _FakeResp:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"response": "Ce shellcode est un downloader.  "}
+
+    monkeypatch.setattr(
+        "src.tp2.utils.analyzer.requests.post",
+        lambda *a, **kw: _FakeResp(),
+    )
+    result = get_llm_analysis(
+        b"\x90",
+        strings={"ascii": ["urlmon.dll"], "utf16le": []},
+        instructions=[],
+        emulation={"detected_apis": [], "instructions_executed": 0, "error": None},
+    )
+    # trailing spaces stripped
+    assert result == "Ce shellcode est un downloader."
+
+def test_llm_analysis_handles_http_error(monkeypatch):
+    """Ollama returns non-200 → informative error message."""
+    from src.tp2.utils.analyzer import get_llm_analysis
+
+    class _FakeResp:
+        status_code = 404
+        text = "model 'zzz' not found"
+
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(
+        "src.tp2.utils.analyzer.requests.post",
+        lambda *a, **kw: _FakeResp(),
+    )
+    result = get_llm_analysis(
+        b"\x90",
+        strings={"ascii": [], "utf16le": []},
+        instructions=[],
+        emulation={"detected_apis": [], "instructions_executed": 0, "error": None},
+    )
+    assert "404" in result
+    assert "not found" in result
