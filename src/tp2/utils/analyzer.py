@@ -1,6 +1,6 @@
 """Shellcode analyzers: strings, capstone, pylibemu, LLM."""
 import re
-
+from capstone import Cs, CS_ARCH_X86, CS_MODE_32
 
 # Minimum length for a candidate string to be considered "interesting"
 DEFAULT_MIN_LENGTH = 4
@@ -52,3 +52,35 @@ def _extract_utf16le(data: bytes, min_length: int) -> list[str]:
     pattern = rb"(?:[\x20-\x7e]\x00){" + str(min_length).encode() + rb",}"
     matches = re.findall(pattern, data)
     return [m.decode("utf-16le") for m in matches]
+
+
+def get_capstone_analysis(
+    shellcode: bytes,
+    base_address: int = 0x1000,
+) -> list[dict]:
+    """
+    Disassemble a shellcode as x86 32-bit and return one dict per instruction.
+
+    Uses Capstone, the same disassembler engine as IDA Pro plugins, radare2,
+    Ghidra, and many CTF/malware tools. We stick to x86 32-bit because all
+    three course shellcodes are 32-bit (typical Metasploit windows/... range).
+
+    :param shellcode: raw shellcode bytes
+    :param base_address: virtual address the disassembler pretends the code
+        was loaded at. Affects branch target display only, not decoding.
+        0x1000 is a conventional 'looks like real code' base.
+    :return: list of {'address', 'mnemonic', 'op_str', 'bytes'} per insn
+    """
+    md = Cs(CS_ARCH_X86, CS_MODE_32)
+    md.detail = False  # we don't need operand introspection here
+    instructions: list[dict] = []
+    for insn in md.disasm(shellcode, base_address):
+        instructions.append(
+            {
+                "address": insn.address,
+                "mnemonic": insn.mnemonic,
+                "op_str": insn.op_str,
+                "bytes": insn.bytes.hex(),
+            }
+        )
+    return instructions

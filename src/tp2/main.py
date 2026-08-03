@@ -2,9 +2,16 @@
 import argparse
 import sys
 
-from tp2.utils.analyzer import get_shellcode_strings
+from tp2.utils.analyzer import (
+    get_capstone_analysis,
+    get_shellcode_strings,
+)
 from tp2.utils.config import logger
 from tp2.utils.lib import load_shellcode
+
+
+# Cap how many disassembled instructions we log (readability)
+MAX_INSTRUCTIONS_LOGGED = 30
 
 
 def main() -> int:
@@ -37,7 +44,20 @@ def main() -> int:
         else:
             logger.info(f"Strings ({kind}) — none")
 
-    # Lots 3-5 will plug more analysers here.
+    # --- Capstone disassembly ---
+    instructions = get_capstone_analysis(shellcode)
+    total = len(instructions)
+    shown = min(total, MAX_INSTRUCTIONS_LOGGED)
+    logger.info(f"Capstone — {total} instructions decoded (showing first {shown}):")
+    for insn in instructions[:shown]:
+        logger.info(
+            f"  0x{insn['address']:04x}: "
+            f"{insn['mnemonic']:<6} {insn['op_str']}"
+        )
+    if total > shown:
+        logger.info(f"  ... {total - shown} more instructions truncated")
+
+    # Lots 4-5 will plug pylibemu + LLM here.
 
     logger.info("Shellcode analysed !")
     return 0

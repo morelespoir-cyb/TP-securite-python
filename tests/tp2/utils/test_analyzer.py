@@ -75,3 +75,56 @@ def test_get_shellcode_strings_on_easy_shellcode_finds_urlmon():
 
 def test_default_min_length_constant():
     assert DEFAULT_MIN_LENGTH == 4
+
+
+# ---------- get_capstone_analysis ----------
+
+
+def test_capstone_disassembles_simple_x86():
+    """
+    Sanity check on a well-known x86 sequence:
+    - 0x90 = NOP
+    - 0x31 0xC0 = XOR EAX, EAX
+    - 0xC3 = RET
+    """
+    from src.tp2.utils.analyzer import get_capstone_analysis
+    result = get_capstone_analysis(b"\x90\x31\xc0\xc3")
+    assert len(result) == 3
+    assert result[0]["mnemonic"] == "nop"
+    assert result[1]["mnemonic"] == "xor"
+    assert result[1]["op_str"] == "eax, eax"
+    assert result[2]["mnemonic"] == "ret"
+
+
+def test_capstone_returns_addresses_from_base():
+    """Addresses start at base_address and increment per instruction size."""
+    from src.tp2.utils.analyzer import get_capstone_analysis
+    result = get_capstone_analysis(b"\x90\x90\x90", base_address=0x2000)
+    assert result[0]["address"] == 0x2000
+    assert result[1]["address"] == 0x2001
+    assert result[2]["address"] == 0x2002
+
+
+def test_capstone_empty_input():
+    from src.tp2.utils.analyzer import get_capstone_analysis
+    assert get_capstone_analysis(b"") == []
+
+
+def test_capstone_stops_on_undecodable_byte():
+    """Capstone stops (silently) when it hits an invalid opcode."""
+    from src.tp2.utils.analyzer import get_capstone_analysis
+    # \x90 (nop) then \xff\xff\xff\xff which is not a valid standalone insn
+    # at least the first NOP should be there
+    result = get_capstone_analysis(b"\x90\xff\xff\xff\xff")
+    assert result[0]["mnemonic"] == "nop"
+
+
+def test_capstone_on_easy_shellcode():
+    """Real-world sanity: easy shellcode disassembles to > 20 instructions."""
+    from src.tp2.utils.lib import load_shellcode
+    from src.tp2.utils.analyzer import get_capstone_analysis
+    data = load_shellcode("shellcodes/easy.txt")
+    result = get_capstone_analysis(data)
+    assert len(result) > 20
+    # First instruction of the easy shellcode is a JMP (EB 54)
+    assert result[0]["mnemonic"] == "jmp"
