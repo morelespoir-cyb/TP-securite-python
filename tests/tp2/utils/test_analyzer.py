@@ -128,3 +128,49 @@ def test_capstone_on_easy_shellcode():
     assert len(result) > 20
     # First instruction of the easy shellcode is a JMP (EB 54)
     assert result[0]["mnemonic"] == "jmp"
+
+
+    # ---------- get_pylibemu_analysis (unicorn-backed) ----------
+
+def test_pylibemu_returns_expected_shape():
+    """Empty payload: no crash, structured result."""
+    from src.tp2.utils.analyzer import get_pylibemu_analysis
+    # A single ret at the very start returns immediately
+    result = get_pylibemu_analysis(b"\xc3")
+    assert "detected_apis" in result
+    assert "instructions_executed" in result
+    assert "error" in result
+    assert isinstance(result["detected_apis"], list)
+
+def test_pylibemu_counts_instructions():
+    """Simple NOP sled: instructions_executed reflects the emulation."""
+    from src.tp2.utils.analyzer import get_pylibemu_analysis
+    result = get_pylibemu_analysis(b"\x90" * 10 + b"\xc3")
+    assert result["instructions_executed"] >= 10
+
+def test_pylibemu_detects_known_hash_in_ebx():
+    """
+    Handcrafted stub that loads the ROR13 hash of 'LoadLibraryA' into EBX,
+    then rets. The hook should detect and record 'LoadLibraryA'.
+    """
+    from src.tp2.utils.analyzer import get_pylibemu_analysis
+    from src.tp2.utils.api_hashes import ror13_hash
+    hash_val = ror13_hash("LoadLibraryA")
+    # mov ebx, imm32 → BB imm32(LE) ; then ret (C3)
+    stub = b"\xbb" + hash_val.to_bytes(4, "little") + b"\xc3"
+    result = get_pylibemu_analysis(stub)
+    assert "LoadLibraryA" in result["detected_apis"]
+
+def test_pylibemu_on_easy_shellcode_runs_without_python_crash():
+    """
+    Real-world sanity: the easy shellcode should emulate for at least a
+    few instructions before crashing on an invalid memory access, and
+    the function must return cleanly (no Python exception).
+    """
+    from src.tp2.utils.lib import load_shellcode
+    from src.tp2.utils.analyzer import get_pylibemu_analysis
+    data = load_shellcode("shellcodes/easy.txt")
+    result = get_pylibemu_analysis(data)
+    assert result["instructions_executed"] > 0
+    # emulation almost certainly fails at some point → we accept it
+        # but the function returns cleanly

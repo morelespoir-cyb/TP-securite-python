@@ -4,6 +4,7 @@ import sys
 
 from tp2.utils.analyzer import (
     get_capstone_analysis,
+    get_pylibemu_analysis,
     get_shellcode_strings,
 )
 from tp2.utils.config import logger
@@ -57,7 +58,23 @@ def main() -> int:
     if total > shown:
         logger.info(f"  ... {total - shown} more instructions truncated")
 
-    # Lots 4-5 will plug pylibemu + LLM here.
+    # --- Pylibemu-style emulation (backed by unicorn) ---
+    emu = get_pylibemu_analysis(shellcode)
+    logger.info(
+        f"Emulation — {emu['instructions_executed']} instructions executed"
+    )
+    if emu["detected_apis"]:
+        logger.info(
+            f"Detected Windows APIs ({len(emu['detected_apis'])}):"
+        )
+        for api in emu["detected_apis"]:
+            logger.info(f"  - {api}")
+    else:
+        logger.info("Detected Windows APIs: none")
+    if emu["error"]:
+        logger.info(f"Emulation note: {emu['error']}")
+
+    # Lot 5 will plug the LLM analyser here.
 
     logger.info("Shellcode analysed !")
     return 0
