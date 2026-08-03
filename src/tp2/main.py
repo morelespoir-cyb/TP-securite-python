@@ -2,6 +2,7 @@
 import argparse
 import sys
 
+from tp2.utils.analyzer import get_shellcode_strings
 from tp2.utils.config import logger
 from tp2.utils.lib import load_shellcode
 
@@ -26,11 +27,17 @@ def main() -> int:
 
     logger.info(f"Testing shellcode of size {len(shellcode)}B")
 
-    # Lots 2-5 will plug analysers here:
-    #   strings = get_shellcode_strings(shellcode)
-    #   capstone_out = get_capstone_analysis(shellcode)
-    #   pylibemu_out = get_pylibemu_analysis(shellcode)
-    #   llm_out = get_llm_analysis(shellcode, strings, capstone_out, pylibemu_out)
+    # --- Strings extraction ---
+    strings = get_shellcode_strings(shellcode)
+    for kind, items in strings.items():
+        if items:
+            logger.info(f"Strings ({kind}) — {len(items)} found:")
+            for s in items:
+                logger.info(f"  '{s}'")
+        else:
+            logger.info(f"Strings ({kind}) — none")
+
+    # Lots 3-5 will plug more analysers here.
 
     logger.info("Shellcode analysed !")
     return 0
