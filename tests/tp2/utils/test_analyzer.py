@@ -46,12 +46,12 @@ def test_extract_utf16le_respects_min_length():
 # ---------- get_shellcode_strings (public API) ----------
 
 
-def test_get_shellcode_strings_returns_both_kinds():
+def test_get_shellcode_strings_returns_all_kinds():
     ascii_part = b"cmd.exe"
-    # \xff\xff is a clean separator: no ASCII printable, no valid UTF-16LE pair
     wide_part = "kernel32".encode("utf-16le")
     data = ascii_part + b"\xff\xff" + wide_part
     result = get_shellcode_strings(data)
+    assert set(result.keys()) == {"ascii", "utf16le", "stack_pushed"}
     assert "cmd.exe" in result["ascii"]
     assert "kernel32" in result["utf16le"]
 
@@ -302,3 +302,64 @@ def test_llm_analysis_handles_http_error(monkeypatch):
     )
     assert "404" in result
     assert "not found" in result
+
+
+    # ---------- extract_stack_pushed_strings ----------
+
+def test_stack_pushed_simple_run():
+        """
+        Two consecutive `push imm32`:
+        - push 0x64636261 → bytes 61 62 63 64 → "abcd"
+        - push 0x68676665 → bytes 65 66 67 68 → "efgh"
+        Last push first (stack grows down) → "efghabcd"
+        """
+        from src.tp2.utils.analyzer import extract_stack_pushed_strings
+        sc = b"\x68\x61\x62\x63\x64\x68\x65\x66\x67\x68"
+        result = extract_stack_pushed_strings(sc, min_length=4)
+        assert result == ["efghabcd"]
+
+def test_stack_pushed_ignores_short_runs():
+        """Single push (4 bytes only) is skipped when min_length=5."""
+        from src.tp2.utils.analyzer import extract_stack_pushed_strings
+        sc = b"\x68\x61\x62\x63\x64"
+        assert extract_stack_pushed_strings(sc, min_length=5) == []
+
+def test_stack_pushed_skips_non_printable_runs():
+        """Runs whose decoded bytes are mostly non-printable get filtered out."""
+        from src.tp2.utils.analyzer import extract_stack_pushed_strings
+        # Two pushes but the bytes are 0x01, 0x02 etc. → not printable
+        sc = b"\x68\x01\x02\x03\x04\x68\x05\x06\x07\x08"
+        assert extract_stack_pushed_strings(sc) == []
+
+def test_stack_pushed_stops_on_non_push():
+        """A run terminates on any non-`push imm32` opcode."""
+        from src.tp2.utils.analyzer import extract_stack_pushed_strings
+        # push "abcd", then RET (0xc3), then push "efgh"
+        sc = b"\x68\x61\x62\x63\x64\xc3\x68\x65\x66\x67\x68"
+        result = extract_stack_pushed_strings(sc, min_length=4)
+        # Each isolated single push produces 4 chars → both should be captured
+        assert "abcd" in result
+        assert "efgh" in result
+
+def test_stack_pushed_on_medium_shellcode_finds_cmd():
+        """
+        Real-world sanity: medium shellcode is a 'net user /ADD' payload
+        that push-assembles its command line on the stack.
+        """
+        from src.tp2.utils.lib import load_shellcode
+        from src.tp2.utils.analyzer import extract_stack_pushed_strings
+        data = load_shellcode("shellcodes/medium.txt")
+        result = extract_stack_pushed_strings(data)
+        joined = " ".join(result).lower()
+        assert "cmd" in joined
+        assert "net" in joined
+        assert "add" in joined
+
+def test_stack_pushed_on_hard_shellcode_finds_winsock_hint():
+        """Hard shellcode is a reverse TCP shell → ws2_32 must appear."""
+        from src.tp2.utils.lib import load_shellcode
+        from src.tp2.utils.analyzer import extract_stack_pushed_strings
+        data = load_shellcode("shellcodes/hard.txt")
+        result = extract_stack_pushed_strings(data)
+        joined = " ".join(result).lower()
+        assert "ws2_32" in joined

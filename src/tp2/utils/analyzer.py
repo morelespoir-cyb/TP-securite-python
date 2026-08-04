@@ -13,29 +13,88 @@ from src.tp2.utils.api_hashes import API_HASHES
 # Minimum length for a candidate string to be considered "interesting"
 DEFAULT_MIN_LENGTH = 4
 
+# push imm32 opcode: 0x68 followed by 4 bytes of immediate
+_PUSH_IMM32_OPCODE = 0x68
+_PUSH_IMM32_LEN = 5   # opcode + 4 bytes
+
+
+def extract_stack_pushed_strings(
+    shellcode: bytes,
+    min_length: int = DEFAULT_MIN_LENGTH,
+) -> list[str]:
+    """
+    Reconstruct strings that a Metasploit-style shellcode assembles on
+    the stack via consecutive `push imm32` instructions.
+
+    Why this matters: Metasploit shellcodes commonly build their string
+    arguments (paths, DLL names, command lines) byte-by-byte on the
+    stack rather than embedding them as data. A single ASCII scan of
+    the raw shellcode bytes shows a fragmented mess like
+    'hexe hcmd. h/c nh net' — the `h` are the 0x68 push opcodes, and
+    the runtime string reads back from stack in reverse push order.
+
+    Algorithm:
+    - Walk the shellcode looking for runs of `0x68 XX XX XX XX` blocks
+    - For each run, take the 4 immediate bytes of each push
+    - Concatenate them in REVERSE order (last push first) — that's the
+      order in which the CPU will read the string once ESP points to it
+    - Keep runs whose printable-ASCII decoding is >= min_length chars
+
+    :param shellcode: raw shellcode bytes
+    :param min_length: minimum chars for a reconstructed string to count
+    :return: list of reconstructed strings, in order of appearance
+    """
+    reconstructed: list[str] = []
+    i = 0
+    while i < len(shellcode):
+        # Detect a run of consecutive `push imm32`
+        run_imms: list[bytes] = []
+        while (
+            i + _PUSH_IMM32_LEN <= len(shellcode)
+            and shellcode[i] == _PUSH_IMM32_OPCODE
+        ):
+            run_imms.append(shellcode[i + 1 : i + _PUSH_IMM32_LEN])
+            i += _PUSH_IMM32_LEN
+
+        if run_imms:
+            # Stack grows down: last push ends up at lowest address (front
+            # of the resulting string). So reading the string means reading
+            # pushes in reverse order.
+            joined = b"".join(reversed(run_imms))
+            decoded = joined.decode("ascii", errors="replace").rstrip("\x00")
+            # Keep only if it's mostly printable and long enough
+            printable_ratio = sum(
+                1 for c in decoded if 0x20 <= ord(c) <= 0x7E
+            ) / max(len(decoded), 1)
+            if len(decoded) >= min_length and printable_ratio >= 0.85:
+                reconstructed.append(decoded)
+        else:
+            i += 1
+
+    return reconstructed
+
 
 def get_shellcode_strings(
     shellcode: bytes,
     min_length: int = DEFAULT_MIN_LENGTH,
 ) -> dict[str, list[str]]:
     """
-    Extract printable ASCII and UTF-16LE strings from a shellcode blob.
+    Extract printable strings from a shellcode blob using three methods:
+    - Raw ASCII scan
+    - Raw UTF-16LE scan
+    - Stack-pushed string reconstruction (Metasploit-style)
 
-    Mirrors the Unix `strings` command with both ASCII and wide-string
-    scanning. UTF-16LE is important on Windows shellcodes where API
-    argument strings are commonly wide-encoded.
-
-    Only strings of `min_length` characters or more are returned, to
-    filter out noise from opcodes that happen to look printable.
+    The `stack_pushed` category is the most useful for real-world
+    Metasploit shellcodes where strings are assembled on the stack.
 
     :param shellcode: raw shellcode bytes
     :param min_length: minimum length for a string to be reported
-    :return: dict with keys 'ascii' and 'utf16le', each mapping to a
-             list of extracted strings (ordered by appearance)
+    :return: dict with keys 'ascii', 'utf16le', 'stack_pushed'
     """
     return {
         "ascii": _extract_ascii(shellcode, min_length),
         "utf16le": _extract_utf16le(shellcode, min_length),
+        "stack_pushed": extract_stack_pushed_strings(shellcode, min_length),
     }
 
 
@@ -197,6 +256,7 @@ def _build_llm_prompt(
     """
     ascii_strings = strings.get("ascii", [])
     utf16_strings = strings.get("utf16le", [])
+    stack_strings = strings.get("stack_pushed", [])
 
     insn_lines = [
         f"  0x{i['address']:04x}: {i['mnemonic']:<6} {i['op_str']}"
@@ -208,7 +268,13 @@ def _build_llm_prompt(
         )
 
     parts = [
-        "== Chaînes ASCII trouvées ==",
+        "== Chaînes reconstruites depuis la pile (push imm32) ==",
+        "Ces chaînes ont été assemblées instruction par instruction sur "
+        "la pile — c'est la technique Metasploit classique. Elles sont "
+        "les indicateurs les plus fiables du comportement du shellcode.",
+        "\n".join(f"  - {s!r}" for s in stack_strings) or "  (aucune)",
+        "",
+        "== Chaînes ASCII brutes trouvées ==",
         "\n".join(f"  - {s!r}" for s in ascii_strings) or "  (aucune)",
         "",
         "== Chaînes UTF-16LE trouvées ==",
@@ -221,7 +287,8 @@ def _build_llm_prompt(
         "\n".join(f"  - {api}" for api in emulation.get("detected_apis", []))
         or "  (aucune — l'émulation n'a pas pu résoudre les APIs)",
         "",
-        "Analyse ce shellcode.",
+        "Analyse ce shellcode. Concentre-toi surtout sur les chaînes "
+        "reconstruites depuis la pile.",
     ]
     return "\n".join(parts)
 
