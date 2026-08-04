@@ -43,12 +43,17 @@ def main() -> int:
     # --- Strings extraction ---
     strings = get_shellcode_strings(shellcode)
     for kind, items in strings.items():
+        label = {
+            "ascii": "ASCII (raw)",
+            "utf16le": "UTF-16LE",
+            "stack_pushed": "Stack-pushed (Metasploit-style)",
+        }.get(kind, kind)
         if items:
-            logger.info(f"Strings ({kind}) — {len(items)} found:")
+            logger.info(f"Strings — {label} — {len(items)} found:")
             for s in items:
                 logger.info(f"  '{s}'")
         else:
-            logger.info(f"Strings ({kind}) — none")
+            logger.info(f"Strings — {label} — none")
 
     # --- Capstone disassembly ---
     instructions = get_capstone_analysis(shellcode)

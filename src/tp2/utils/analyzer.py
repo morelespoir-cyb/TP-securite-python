@@ -79,12 +79,12 @@ def get_shellcode_strings(
     min_length: int = DEFAULT_MIN_LENGTH,
 ) -> dict[str, list[str]]:
     """
-    Extract printable strings from a shellcode blob using three methods:
+    Extract printable strings from a shellcode using three methods:
     - Raw ASCII scan
     - Raw UTF-16LE scan
     - Stack-pushed string reconstruction (Metasploit-style)
 
-    The `stack_pushed` category is the most useful for real-world
+    The 'stack_pushed' category is the most useful for real-world
     Metasploit shellcodes where strings are assembled on the stack.
 
     :param shellcode: raw shellcode bytes
@@ -228,7 +228,7 @@ def get_pylibemu_analysis(shellcode: bytes) -> dict:
 
 _LLM_DEFAULT_MODEL = "qwen2.5:1.5b"
 _LLM_DEFAULT_URL = "http://localhost:11434/api/generate"
-_LLM_TIMEOUT = 60  # seconds — qwen2.5:1.5b runs in a few s on CPU, be generous
+_LLM_TIMEOUT = 180  # seconds — qwen2.5:7b can take ~40s on CPU
 
 
 _LLM_SYSTEM_PROMPT = (
@@ -251,8 +251,7 @@ def _build_llm_prompt(
 ) -> str:
     """
     Compose the analyst prompt from the three analyzer outputs.
-    Instructions are truncated to keep the prompt under the model's
-    practical context window.
+    Instructions are truncated to keep the prompt under context window.
     """
     ascii_strings = strings.get("ascii", [])
     utf16_strings = strings.get("utf16le", [])
